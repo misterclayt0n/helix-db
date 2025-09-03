@@ -11,7 +11,7 @@ use crate::{
 };
 use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, cmp::Ordering, collections::HashMap, fmt::Debug};
+use std::{borrow::Cow, cmp::Ordering, collections::HashMap, fmt::Debug, hash::{Hash, Hasher}};
 
 // TODO: make this generic over the type of encoding (f32, f64, etc)
 // TODO: use const param to set dimension
@@ -46,6 +46,12 @@ impl Ord for HVector {
             .distance
             .partial_cmp(&self.distance)
             .unwrap_or(Ordering::Equal)
+    }
+}
+impl Hash for HVector {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.level.hash(state);
     }
 }
 

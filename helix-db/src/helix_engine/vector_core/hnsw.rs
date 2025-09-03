@@ -1,9 +1,9 @@
-use crate::{helix_engine::types::VectorError, protocol::value::Value};
+use crate::helix_engine::vector_core::txn::VecTxn;
 use crate::helix_engine::vector_core::vector::HVector;
+use crate::{helix_engine::types::VectorError, protocol::value::Value};
 use heed3::{RoTxn, RwTxn};
 
-pub trait HNSW
-{
+pub trait HNSW {
     /// Search for the k nearest neighbors of a query vector
     ///
     /// # Arguments
@@ -17,7 +17,7 @@ pub trait HNSW
     /// A vector of tuples containing the id and distance of the nearest neighbors
     fn search<F>(
         &self,
-        txn: &RoTxn,
+        txn: &VecTxn,
         query: &[f64],
         k: usize,
         label: &str,
@@ -37,9 +37,9 @@ pub trait HNSW
     /// # Returns
     ///
     /// An HVector of the data inserted
-    fn insert<F>(
+    fn insert<'scope, 'env, F>(
         &self,
-        txn: &mut RwTxn,
+        txn: &'scope mut VecTxn<'scope, 'env>,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
     ) -> Result<HVector, VectorError>
@@ -68,11 +68,7 @@ pub trait HNSW
     ///
     /// * `txn` - The transaction to use
     /// * `id` - The id of the vector
-    fn delete(
-        &self,
-        txn: &mut RwTxn,
-        id: u128,
-    ) -> Result<(), VectorError>;
+    fn delete(&self, txn: &mut RwTxn, id: u128) -> Result<(), VectorError>;
 
     /// Get specific vector based on id and level
     ///
@@ -94,4 +90,3 @@ pub trait HNSW
         with_data: bool,
     ) -> Result<HVector, VectorError>;
 }
-

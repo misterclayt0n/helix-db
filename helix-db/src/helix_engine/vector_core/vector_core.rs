@@ -3,9 +3,7 @@ use crate::{
     helix_engine::{
         types::VectorError,
         vector_core::{
-            hnsw::HNSW,
-            utils::{Candidate, HeapOps, VectorFilter},
-            vector::HVector,
+            hnsw::HNSW, txn::VecTxn, utils::{Candidate, HeapOps, VectorFilter}, vector::HVector
         },
     },
     protocol::value::Value,
@@ -154,7 +152,7 @@ impl VectorCore {
     #[inline(always)]
     fn get_neighbors<F>(
         &self,
-        txn: &RoTxn,
+        txn: &VecTxn,
         id: u128,
         level: usize,
         filter: Option<&[F]>,
@@ -162,6 +160,10 @@ impl VectorCore {
     where
         F: Fn(&HVector, &RoTxn) -> bool,
     {
+        if let Some(neighbors) = txn.get_neighbors(id, level) {
+            return Ok(neighbors);
+        }
+
         let out_key = Self::out_edges_key(id, level, None);
         let mut neighbors = Vec::with_capacity(self.config.m_max_0.min(self.config.min_neighbors));
 
@@ -209,50 +211,20 @@ impl VectorCore {
     }
 
     #[inline(always)]
-    fn set_neighbours(
+    fn set_neighbours<'scope, 'env, 'a>(
         &self,
-        txn: &mut RwTxn,
+        txn: &'scope mut VecTxn<'scope, 'env>,
         id: u128,
-        neighbors: &BinaryHeap<HVector>,
+        neighbors: &'scope BinaryHeap<HVector>,
         level: usize,
     ) -> Result<(), VectorError> {
-        let prefix = Self::out_edges_key(id, level, None);
-
-        let mut keys_to_delete: HashSet<Vec<u8>> = self
-            .edges_db
-            .prefix_iter(txn, prefix.as_ref())?
-            .filter_map(|result| result.ok().map(|(key, _)| key.to_vec()))
-            .collect();
-
-        neighbors
-            .iter()
-            .try_for_each(|neighbor| -> Result<(), VectorError> {
-                let neighbor_id = neighbor.get_id();
-                if neighbor_id == id {
-                    return Ok(());
-                }
-
-                let out_key = Self::out_edges_key(id, level, Some(neighbor_id));
-                keys_to_delete.remove(&out_key);
-                self.edges_db.put(txn, &out_key, &())?;
-
-                let in_key = Self::out_edges_key(neighbor_id, level, Some(id));
-                keys_to_delete.remove(&in_key);
-                self.edges_db.put(txn, &in_key, &())?;
-
-                Ok(())
-            })?;
-
-        for key in keys_to_delete {
-            self.edges_db.delete(txn, &key)?;
-        }
-
+        txn.set_neighbors(id, level, neighbors);
         Ok(())
     }
 
     fn select_neighbors<'a, F>(
         &'a self,
-        txn: &RoTxn,
+        txn: &VecTxn,
         query: &'a HVector,
         mut cands: BinaryHeap<HVector>,
         level: usize,
@@ -289,7 +261,7 @@ impl VectorCore {
                 }
                 */
 
-                if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, txn)) {
+                if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, &txn.txn)) {
                     result.push(neighbor);
                 }
             }
@@ -301,7 +273,7 @@ impl VectorCore {
 
     fn search_level<'a, F>(
         &'a self,
-        txn: &RoTxn,
+        txn: &VecTxn,
         query: &'a HVector,
         entry_point: &'a mut HVector,
         ef: usize,
@@ -407,7 +379,7 @@ impl HNSW for VectorCore {
 
     fn search<F>(
         &self,
-        txn: &RoTxn,
+        txn: &VecTxn,
         query: &[f64],
         k: usize,
         label: &str,
@@ -461,9 +433,9 @@ impl HNSW for VectorCore {
         Ok(results)
     }
 
-    fn insert<F>(
+    fn insert<'scope, 'env, F>(
         &self,
-        txn: &mut RwTxn,
+        txn: &'scope mut VecTxn<'scope, 'env>,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
     ) -> Result<HVector, VectorError>
@@ -473,21 +445,21 @@ impl HNSW for VectorCore {
         let new_level = self.get_new_level();
 
         let mut query = HVector::from_slice(0, data.to_vec());
-        self.put_vector(txn, &query)?;
+        self.put_vector(txn.txn, &query)?;
         query.level = new_level;
         if new_level > 0 {
-            self.put_vector(txn, &query)?;
+            self.put_vector(txn.txn, &query)?;
         }
 
-        let entry_point = match self.get_entry_point(txn) {
+        let entry_point = match self.get_entry_point(txn.txn) {
             Ok(ep) => ep,
             Err(_) => {
-                self.set_entry_point(txn, &query)?;
+                self.set_entry_point(txn.txn, &query)?;
                 query.set_distance(0.0);
 
                 if let Some(fields) = fields {
                     self.vector_data_db.put(
-                        txn,
+                        txn.txn,
                         &query.get_id().to_be_bytes(),
                         &bincode::serialize(&fields)?,
                     )?;
@@ -532,12 +504,12 @@ impl HNSW for VectorCore {
         }
 
         if new_level > l {
-            self.set_entry_point(txn, &query)?;
+            self.set_entry_point(txn.get_wtxn(), &query)?;
         }
 
         if let Some(fields) = fields {
             self.vector_data_db.put(
-                txn,
+                txn.get_wtxn(),
                 &query.get_id().to_be_bytes(),
                 &bincode::serialize(&fields)?,
             )?;
