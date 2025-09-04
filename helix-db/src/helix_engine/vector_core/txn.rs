@@ -38,36 +38,36 @@ impl<'env> VecTxn<'env> {
         // get change sets in neighbors
         let neighbors = neighbors.iter().map(Rc::clone).collect::<HashSet<_>>();
 
-        let old_neighbors = self
-            .cache
-            .get(&(curr_vec.get_id(), level))
-            .cloned()
-            .unwrap_or_default();
-        let old_neighbors_to_delete = old_neighbors
-            .difference(&neighbors)
-            .map(Rc::clone)
-            .collect::<HashSet<_>>();
+        // let old_neighbors = self
+        //     .cache
+        //     .get(&(curr_vec.get_id(), level))
+        //     .cloned()
+        //     .unwrap_or_default();
+        // let old_neighbors_to_delete = old_neighbors
+        //     .difference(&neighbors)
+        //     .map(Rc::clone)
+        //     .collect::<HashSet<_>>();
 
-        let neighbors_to_add = neighbors
-            .difference(&old_neighbors)
-            .map(Rc::clone)
-            .collect::<HashSet<_>>();
+        // let neighbors_to_add = neighbors
+        //     .difference(&old_neighbors)
+        //     .map(Rc::clone)
+        //     .collect::<HashSet<_>>();
 
-        for neighbor in old_neighbors_to_delete {
-            if let Some(neighbor_set) = self.cache.get_mut(&(neighbor.get_id(), level)) {
-                neighbor_set.remove(&curr_vec);
-            }
-        }
+        // for neighbor in old_neighbors_to_delete {
+        //     if let Some(neighbor_set) = self.cache.get_mut(&(neighbor.get_id(), level)) {
+        //         neighbor_set.remove(&curr_vec);
+        //     }
+        // }
 
-        for neighbor in neighbors_to_add {
-            if neighbor.get_id() == curr_vec.get_id() {
-                continue;
-            }
-            self.cache
-                .entry((neighbor.get_id(), level))
-                .or_insert_with(HashSet::new)
-                .insert(Rc::clone(&curr_vec));
-        }
+        // for neighbor in neighbors_to_add {
+        //     if neighbor.get_id() == curr_vec.get_id() {
+        //         continue;
+        //     }
+        //     self.cache
+        //         .entry((neighbor.get_id(), level))
+        //         .or_insert_with(HashSet::new)
+        //         .insert(Rc::clone(&curr_vec));
+        // }
 
         self.cache.insert((curr_vec.get_id(), level), neighbors);
     }
@@ -103,7 +103,7 @@ impl<'env> VecTxn<'env> {
 
     pub fn commit(mut self, db: &Database<Bytes, Unit>) -> Result<(), VectorError> {
         let txn = &mut self.txn;
-        let mut vec = Vec::with_capacity(self.cache.len() * 128);
+        let mut vec = HashSet::with_capacity(self.cache.len() * 128);
         let mut vecs = 0;
         for (id, level) in self.cache.keys() {
             if let Some(neighbors) = self.cache.get(&(*id, *level)) {
@@ -112,7 +112,9 @@ impl<'env> VecTxn<'env> {
                         continue;
                     }
                     let out_key = VectorCore::out_edges_key(*id, *level, Some(neighbor.get_id()));
-                    vec.push(out_key);
+                    let in_key = VectorCore::out_edges_key(neighbor.get_id(), *level, Some(*id));
+                    vec.insert(out_key);
+                    vec.insert(in_key);
                 }
                 vecs += 1;
             }
