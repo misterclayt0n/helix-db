@@ -60,6 +60,9 @@ impl<'env> VecTxn<'env> {
         }
 
         for neighbor in neighbors_to_add {
+            if neighbor.get_id() == curr_vec.get_id() {
+                continue;
+            }
             self.cache
                 .entry((neighbor.get_id(), level))
                 .or_insert_with(HashSet::new)
@@ -105,6 +108,9 @@ impl<'env> VecTxn<'env> {
         for (id, level) in self.cache.keys() {
             if let Some(neighbors) = self.cache.get(&(*id, *level)) {
                 for neighbor in neighbors {
+                    if neighbor.get_id() == *id {
+                        continue;
+                    }
                     let out_key = VectorCore::out_edges_key(*id, *level, Some(neighbor.get_id()));
                     vec.push(out_key);
                 }
