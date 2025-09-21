@@ -73,10 +73,22 @@ pub struct CloudInstanceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnonymousCloudConfig {
+    pub instance_id: String,
+    pub deployment_key: String,
+    pub api_key: String,
+    #[serde(default = "default_release_build_mode")]
+    pub build_mode: BuildMode,
+    #[serde(flatten)]
+    pub db_config: DbConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CloudConfig {
     HelixCloud(CloudInstanceConfig),
     FlyIo(FlyInstanceConfig),
     Ecr(EcrConfig),
+    AnonymousCloud(AnonymousCloudConfig),
 }
 
 impl CloudConfig {
@@ -85,6 +97,7 @@ impl CloudConfig {
             CloudConfig::HelixCloud(config) => Some(&config.cluster_id),
             CloudConfig::FlyIo(config) => Some(&config.cluster_id),
             CloudConfig::Ecr(_) => None, // ECR doesn't use cluster_id
+            CloudConfig::AnonymousCloud(_) => None, // Anonymous cloud doesn't use cluster_id
         }
     }
 }
@@ -164,6 +177,7 @@ pub enum InstanceInfo<'a> {
     HelixCloud(&'a CloudInstanceConfig),
     FlyIo(&'a FlyInstanceConfig),
     Ecr(&'a EcrConfig),
+    AnonymousCloud(&'a AnonymousCloudConfig),
 }
 
 impl<'a> InstanceInfo<'a> {
@@ -173,6 +187,7 @@ impl<'a> InstanceInfo<'a> {
             InstanceInfo::HelixCloud(config) => config.build_mode,
             InstanceInfo::FlyIo(config) => config.build_mode,
             InstanceInfo::Ecr(config) => config.build_mode,
+            InstanceInfo::AnonymousCloud(config) => config.build_mode,
         }
     }
 
@@ -182,6 +197,7 @@ impl<'a> InstanceInfo<'a> {
             InstanceInfo::HelixCloud(_) => None,
             InstanceInfo::FlyIo(_) => None,
             InstanceInfo::Ecr(_) => None,
+            InstanceInfo::AnonymousCloud(_) => None,
         }
     }
 
@@ -191,6 +207,7 @@ impl<'a> InstanceInfo<'a> {
             InstanceInfo::HelixCloud(config) => Some(&config.cluster_id),
             InstanceInfo::FlyIo(config) => Some(&config.cluster_id),
             InstanceInfo::Ecr(_) => None, // ECR doesn't use cluster_id
+            InstanceInfo::AnonymousCloud(_) => None, // Anonymous cloud doesn't use cluster_id
         }
     }
 
@@ -200,6 +217,7 @@ impl<'a> InstanceInfo<'a> {
             InstanceInfo::HelixCloud(config) => &config.db_config,
             InstanceInfo::FlyIo(config) => &config.db_config,
             InstanceInfo::Ecr(config) => &config.db_config,
+            InstanceInfo::AnonymousCloud(config) => &config.db_config,
         }
     }
 
@@ -208,7 +226,9 @@ impl<'a> InstanceInfo<'a> {
     }
 
     pub fn should_build_docker_image(&self) -> bool {
-        matches!(self, InstanceInfo::Local(_)) || matches!(self, InstanceInfo::FlyIo(_))
+        matches!(self, InstanceInfo::Local(_)) 
+            || matches!(self, InstanceInfo::FlyIo(_)) 
+            || matches!(self, InstanceInfo::AnonymousCloud(_))
     }
 
     pub fn docker_build_target(&self) -> Option<&str> {
@@ -217,6 +237,7 @@ impl<'a> InstanceInfo<'a> {
             InstanceInfo::HelixCloud(_) => None,
             InstanceInfo::FlyIo(_) => Some("linux/amd64"),
             InstanceInfo::Ecr(_) => Some("linux/amd64"),
+            InstanceInfo::AnonymousCloud(_) => Some("linux/amd64"),
         }
     }
 
@@ -247,6 +268,7 @@ impl From<InstanceInfo<'_>> for CloudConfig {
             InstanceInfo::HelixCloud(config) => CloudConfig::HelixCloud(config.clone()),
             InstanceInfo::FlyIo(config) => CloudConfig::FlyIo(config.clone()),
             InstanceInfo::Ecr(config) => CloudConfig::Ecr(config.clone()),
+            InstanceInfo::AnonymousCloud(config) => CloudConfig::AnonymousCloud(config.clone()),
             InstanceInfo::Local(_) => unimplemented!(),
         }
     }
@@ -296,11 +318,19 @@ impl HelixConfig {
             if name.is_empty() {
                 return Err(eyre!("Instance name cannot be empty"));
             }
-            if cloud_config.get_cluster_id().is_none() {
-                return Err(eyre!(
-                    "Cloud instance '{}' must have a non-empty cluster_id",
-                    name
-                ));
+            // Skip cluster_id validation for anonymous cloud and ECR instances
+            match cloud_config {
+                CloudConfig::HelixCloud(_) | CloudConfig::FlyIo(_) => {
+                    if cloud_config.get_cluster_id().is_none() {
+                        return Err(eyre!(
+                            "Cloud instance '{}' must have a non-empty cluster_id",
+                            name
+                        ));
+                    }
+                }
+                CloudConfig::Ecr(_) | CloudConfig::AnonymousCloud(_) => {
+                    // These don't require cluster_id
+                }
             }
         }
 
@@ -322,6 +352,9 @@ impl HelixConfig {
                 }
                 CloudConfig::Ecr(config) => {
                     return Ok(InstanceInfo::Ecr(config));
+                }
+                CloudConfig::AnonymousCloud(config) => {
+                    return Ok(InstanceInfo::AnonymousCloud(config));
                 }
             }
         }

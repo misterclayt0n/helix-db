@@ -4,7 +4,7 @@ use crate::config::InstanceInfo;
 use crate::docker::DockerManager;
 use crate::project::ProjectContext;
 use crate::utils::{
-    print_confirm, print_lines, print_newline, print_status, print_success, print_warning,
+    print_confirm, print_info, print_lines, print_newline, print_status, print_success, print_warning,
 };
 use eyre::Result;
 
@@ -74,6 +74,10 @@ pub async fn run(instance_name: String) -> Result<()> {
         }
         InstanceInfo::HelixCloud(_config) => {
             todo!()
+        }
+        InstanceInfo::AnonymousCloud(_config) => {
+            print_warning("Anonymous cloud instances are automatically cleaned up after expiration");
+            print_info("No manual deletion needed for anonymous cloud instances");
         }
         InstanceInfo::Local(_) => {
             // Local instances don't have cloud resources to delete

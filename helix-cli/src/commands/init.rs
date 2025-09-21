@@ -1,11 +1,12 @@
 use crate::CloudDeploymentTypeCommand;
 use crate::commands::integrations::ecr::{EcrAuthType, EcrManager};
 use crate::commands::integrations::fly::{FlyAuthType, FlyManager, Privacy, VmSize};
-use crate::config::{CloudConfig, HelixConfig};
+use crate::config::{CloudConfig, HelixConfig, AnonymousCloudConfig, DbConfig};
 use crate::docker::DockerManager;
 use crate::errors::project_error;
 use crate::project::ProjectContext;
 use crate::utils::{print_instructions, print_status, print_success};
+use crate::cloud_client::CloudClient;
 use eyre::Result;
 use std::env;
 use std::fs;
@@ -54,6 +55,45 @@ pub async fn run(
     // Initialize deployment type
     if let Some(deployment_type) = deployment_type {
         match deployment_type {
+            CloudDeploymentTypeCommand::Dev => {
+                print_status("CLOUD", "Initializing anonymous cloud deployment");
+                
+                // Initialize cloud client
+                let cloud_client = CloudClient::new()?;
+                
+                // Request anonymous cloud instance
+                let init_response = cloud_client.init_cloud_instance().await?;
+                
+                print_status("CLOUD", &format!("Instance ID: {}", init_response.instance_id));
+                print_status("CLOUD", &format!("Expires at: {}", init_response.expires_at));
+                
+                // Create anonymous cloud config
+                let anonymous_config = AnonymousCloudConfig {
+                    instance_id: init_response.instance_id.clone(),
+                    deployment_key: init_response.deployment_key,
+                    api_key: init_response.api_key,
+                    build_mode: crate::config::BuildMode::Release,
+                    db_config: DbConfig::default(),
+                };
+                
+                // Update helix.toml with cloud config
+                config.cloud.insert(
+                    "dev".to_string(),
+                    CloudConfig::AnonymousCloud(anonymous_config),
+                );
+                config.save_to_file(&config_path)?;
+                
+                print_success("Anonymous cloud deployment initialized successfully");
+                print_instructions(
+                    "Important:",
+                    &[
+                        &format!("Your instance ID: {}", init_response.instance_id),
+                        "This instance will expire in 30 days",
+                        "Use 'helix auth login' and 'helix auth claim' to claim this instance",
+                        "Use 'helix push dev' to deploy your instance",
+                    ],
+                );
+            }
             CloudDeploymentTypeCommand::Helix => {
                 // Initialize Helix deployment
             }

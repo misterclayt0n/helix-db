@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use color_eyre::owo_colors::OwoColorize;
 use eyre::Result;
 
+mod cloud_client;
 mod commands;
 mod config;
 mod docker;
@@ -90,6 +91,12 @@ enum Commands {
         action: AuthAction,
     },
 
+    /// Cloud instance operations
+    Cloud {
+        #[clap(subcommand)]
+        action: CloudAction,
+    },
+
     /// Prune containers, images and workspace (preserves volumes)
     Prune {
         /// Instance to prune (if not specified, prunes unused resources)
@@ -121,7 +128,21 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-enum AuthAction {
+pub enum CloudAction {
+    /// Get status of a cloud instance
+    Status {
+        /// Instance name
+        instance: String,
+    },
+    /// Claim an anonymous instance
+    Claim {
+        /// Instance name
+        instance: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthAction {
     /// Login to Helix cloud
     Login,
     /// Logout from Helix cloud
@@ -146,7 +167,9 @@ enum MetricsAction {
 }
 
 #[derive(Subcommand)]
-enum CloudDeploymentTypeCommand {
+pub enum CloudDeploymentTypeCommand {
+    /// Initialize anonymous cloud deployment (dev)
+    Dev,
     /// Initialize Helix deployment
     Helix,
     /// Initialize ECR deployment
@@ -204,6 +227,7 @@ async fn main() -> Result<()> {
         Commands::Stop { instance } => commands::stop::run(instance).await,
         Commands::Status => commands::status::run().await,
         Commands::Auth { action } => commands::auth::run(action).await,
+        Commands::Cloud { action } => commands::cloud::run(action).await,
         Commands::Prune { instance, all } => commands::prune::run(instance, all).await,
         Commands::Delete { instance } => commands::delete::run(instance).await,
         Commands::Metrics { action } => commands::metrics::run(action).await,

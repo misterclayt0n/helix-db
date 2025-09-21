@@ -7,6 +7,7 @@ use crate::docker::DockerManager;
 use crate::metrics_sender::MetricsSender;
 use crate::project::ProjectContext;
 use crate::utils::{print_status, print_success};
+use crate::cloud_client::CloudClient;
 use eyre::Result;
 use std::time::Instant;
 
@@ -130,9 +131,7 @@ async fn push_cloud_instance(
         &format!("Deploying to cloud instance '{instance_name}'"),
     );
 
-    let cluster_id = instance_config
-        .cluster_id()
-        .ok_or_else(|| eyre::eyre!("Cloud instance '{instance_name}' must have a cluster_id"))?;
+    let cluster_id = instance_config.cluster_id();
 
     let metrics_data = if instance_config.should_build_docker_image() {
         // Build happens, get metrics data from build
@@ -172,9 +171,44 @@ async fn push_cloud_instance(
             let helix = HelixManager::new(project);
             helix.deploy(None, instance_name.to_string()).await?;
         }
+        CloudConfig::AnonymousCloud(config) => {
+            print_status("CLOUD", "Deploying to anonymous cloud instance");
+            
+            let docker = DockerManager::new(project);
+            let image_name = docker.image_name(instance_name, config.build_mode);
+            
+            // Tag the image for the cloud registry
+            let cloud_registry = "registry.helix-cloud.com";
+            let cloud_image_name = format!("anonymous/{}", config.instance_id);
+            let cloud_image_full = format!("{cloud_registry}/{cloud_image_name}");
+            
+            // Tag the local image with the cloud registry tag
+            docker.tag(&image_name, cloud_registry)?;
+            
+            print_status("PUSH", "Pushing image to cloud registry");
+            
+            // Push to the cloud registry
+            docker.push(&cloud_image_name, cloud_registry)?;
+            
+            // Deploy using the cloud API
+            let cloud_client = CloudClient::new()?;
+            let deploy_response = cloud_client.deploy_to_cloud(
+                &config.instance_id,
+                &config.deployment_key,
+                &cloud_image_full,
+                "us-east-1", // Default region
+            ).await?;
+            
+            print_success(&format!("Deployed to cloud: {}", deploy_response.app_url));
+            print_status("STATUS", &format!("Deployment status: {}", deploy_response.status));
+            
+            return Ok(metrics_data);
+        }
     }
 
-    print_status("UPLOAD", &format!("Uploading to cluster: {cluster_id}"));
+    if let Some(cluster_id) = cluster_id {
+        print_status("UPLOAD", &format!("Uploading to cluster: {cluster_id}"));
+    }
 
     Ok(metrics_data)
 }

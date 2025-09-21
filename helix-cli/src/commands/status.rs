@@ -31,6 +31,7 @@ pub async fn run() -> Result<()> {
     let mut helix_cloud_instances = Vec::new();
     let mut flyio_instances = Vec::new();
     let mut ecr_instances = Vec::new();
+    let mut anonymous_cloud_instances = Vec::new();
 
     for (name, config) in &project.config.cloud {
         match config {
@@ -42,6 +43,9 @@ pub async fn run() -> Result<()> {
             }
             crate::config::CloudConfig::Ecr(ecr_config) => {
                 ecr_instances.push((name, &ecr_config.repository_name, &ecr_config.region));
+            }
+            crate::config::CloudConfig::AnonymousCloud(anon_config) => {
+                anonymous_cloud_instances.push((name, &anon_config.instance_id));
             }
         }
     }
@@ -64,6 +68,13 @@ pub async fn run() -> Result<()> {
         print_field(
             &format!("{name} (AWS ECR)"),
             &format!("repository {repository_name} in {region}"),
+        );
+    }
+    
+    for (name, instance_id) in anonymous_cloud_instances {
+        print_field(
+            &format!("{name} (Anonymous Cloud)"),
+            &format!("instance {instance_id}"),
         );
     }
     print_newline();

@@ -2,7 +2,7 @@ use crate::commands::integrations::fly::FlyManager;
 use crate::config::CloudConfig;
 use crate::docker::DockerManager;
 use crate::project::ProjectContext;
-use crate::utils::{print_error, print_status, print_success};
+use crate::utils::{print_error, print_info, print_status, print_success};
 use eyre::{OptionExt, Result};
 
 pub async fn run(instance_name: String) -> Result<()> {
@@ -96,6 +96,10 @@ async fn start_cloud_instance(
         }
         CloudConfig::Ecr(_config) => {
             unimplemented!()
+        }
+        CloudConfig::AnonymousCloud(_config) => {
+            print_info("Anonymous cloud instances start automatically when deployed");
+            print_info("Use 'helix push' to deploy and start the instance");
         }
     }
 

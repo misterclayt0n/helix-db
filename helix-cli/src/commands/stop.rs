@@ -2,7 +2,7 @@ use crate::commands::integrations::fly::FlyManager;
 use crate::config::CloudConfig;
 use crate::docker::DockerManager;
 use crate::project::ProjectContext;
-use crate::utils::{print_status, print_success};
+use crate::utils::{print_info, print_status, print_success};
 use eyre::{OptionExt, Result};
 
 pub async fn run(instance_name: String) -> Result<()> {
@@ -72,6 +72,10 @@ async fn stop_cloud_instance(
         }
         CloudConfig::Ecr(_config) => {
             unimplemented!()
+        }
+        CloudConfig::AnonymousCloud(_config) => {
+            print_info("Anonymous cloud instances cannot be manually stopped");
+            print_info("They are automatically cleaned up after expiration");
         }
     }
 
