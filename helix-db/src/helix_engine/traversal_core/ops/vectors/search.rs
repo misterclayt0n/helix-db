@@ -31,7 +31,7 @@ pub trait SearchVAdapter<'a>: Iterator<Item = Result<TraversalValue, GraphError>
         filter: Option<&[F]>,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
         K: TryInto<usize>,
         K::Error: std::fmt::Debug;
 }
@@ -47,7 +47,7 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
         filter: Option<&[F]>,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {

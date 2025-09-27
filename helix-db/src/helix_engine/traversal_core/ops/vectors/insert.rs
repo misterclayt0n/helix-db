@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
 use heed3::RoTxn;
 
@@ -34,7 +34,7 @@ pub trait InsertMultiVAdapter<'a, 'b>: Iterator<Item = Result<TraversalValue, Gr
         fields: Option<Vec<(String, Value)>>,
     ) -> RwVecTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
-        F: Fn(&HVector, &RoTxn) -> bool;
+        F: Fn(&HVector, &RoTxn) -> bool + Sync;
 }
 
 impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertMultiVAdapter<'a, 'b>
@@ -47,7 +47,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertMulti
         fields: Option<Vec<(String, Value)>>,
     ) -> RwVecTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let fields = match fields {
             Some(mut fields) => {
@@ -66,7 +66,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertMulti
             .insert_with_vec_txn::<F>(self.txn, query, fields);
 
         let result = match vector {
-            Ok(vector) => Ok(TraversalValue::Vector(Rc::unwrap_or_clone(vector))),
+            Ok(vector) => Ok(TraversalValue::Vector(Arc::unwrap_or_clone(vector))),
             Err(e) => Err(GraphError::from(e)),
         };
 
@@ -86,7 +86,7 @@ pub trait InsertVAdapter<'a, 'b>: Iterator<Item = Result<TraversalValue, GraphEr
         fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
-        F: Fn(&HVector, &RoTxn) -> bool;
+        F: Fn(&HVector, &RoTxn) -> bool + Sync;
 }
 impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertVAdapter<'a, 'b>
     for RwTraversalIterator<'a, 'b, I>
@@ -98,7 +98,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertVAdap
         fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let fields = match fields {
             Some(mut fields) => {

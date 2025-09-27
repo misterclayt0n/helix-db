@@ -17,10 +17,12 @@ use heed3::{
 };
 use itertools::Itertools;
 use rand::prelude::Rng;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BinaryHeap, HashMap, HashSet},
     rc::Rc,
+    sync::Arc,
     time::Duration,
 };
 
@@ -119,7 +121,7 @@ impl VectorCore {
     }
 
     #[inline]
-    fn get_entry_point_rc(&self, txn: &RoTxn) -> Result<Rc<HVector>, VectorError> {
+    fn get_entry_point_rc(&self, txn: &RoTxn) -> Result<Arc<HVector>, VectorError> {
         let ep_id = self.vectors_db.get(txn, ENTRY_POINT_KEY.as_bytes())?;
         if let Some(ep_id) = ep_id {
             let mut arr = [0u8; 16];
@@ -129,7 +131,7 @@ impl VectorCore {
             let ep = self
                 .get_vector(txn, u128::from_be_bytes(arr), 0, true)
                 .map_err(|_| VectorError::EntryPointNotFound)?;
-            Ok(Rc::new(ep))
+            Ok(Arc::new(ep))
         } else {
             Err(VectorError::EntryPointNotFound)
         }
@@ -165,7 +167,7 @@ impl VectorCore {
     fn set_entry_point_with_rc(
         &self,
         txn: &mut RwTxn,
-        entry: Rc<HVector>,
+        entry: Arc<HVector>,
     ) -> Result<(), VectorError> {
         let entry_key = ENTRY_POINT_KEY.as_bytes().to_vec();
         self.vectors_db
@@ -192,9 +194,9 @@ impl VectorCore {
         id: u128,
         level: usize,
         filter: Option<&[F]>,
-    ) -> Result<Vec<Rc<HVector>>, VectorError>
+    ) -> Result<Vec<Arc<HVector>>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         if let Some(neighbors) = txn.get_neighbors(id, level) {
             return Ok(neighbors);
@@ -230,7 +232,7 @@ impl VectorCore {
             };
 
             if passes_filters {
-                neighbors.push(Rc::new(vector));
+                neighbors.push(Arc::new(vector));
             }
         }
         neighbors.shrink_to_fit();
@@ -249,7 +251,7 @@ impl VectorCore {
         filter: Option<&[F]>,
     ) -> Result<Vec<HVector>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let out_key = Self::out_edges_key(id, level, None);
         let mut neighbors = Vec::with_capacity(self.config.m_max_0.min(self.config.min_neighbors));
@@ -301,8 +303,8 @@ impl VectorCore {
     fn set_neighbours_with_vec_txn(
         &self,
         txn: &mut VecTxn,
-        curr_vec: Rc<HVector>,
-        neighbors: &BinaryHeap<Rc<HVector>>,
+        curr_vec: Arc<HVector>,
+        neighbors: &BinaryHeap<Arc<HVector>>,
         level: usize,
     ) -> Result<(), VectorError> {
         txn.set_neighbors(curr_vec, level, neighbors);
@@ -355,38 +357,68 @@ impl VectorCore {
         &'a self,
         txn: &'a mut VecTxn,
         query: &'a HVector,
-        mut cands: BinaryHeap<Rc<HVector>>,
+        mut cands: BinaryHeap<Arc<HVector>>,
         level: usize,
         should_extend: bool,
         filter: Option<&[F]>,
-    ) -> Result<BinaryHeap<Rc<HVector>>, VectorError>
+    ) -> Result<BinaryHeap<Arc<HVector>>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
+        use dashmap::DashSet;
         let m = self.config.m;
 
         if !should_extend {
             return Ok(cands.take_inord(m));
         }
-        let mut visited: HashSet<u128> = HashSet::new();
-        let mut result = BinaryHeap::with_capacity(m * cands.len());
-        for candidate in cands.iter() {
-            for mut neighbor in
-                self._get_neighbors_with_vec_txn(txn, candidate.get_id(), level, filter)?
-            {
-                if !visited.insert(neighbor.get_id()) {
-                    continue;
-                }
-                let distance = neighbor.distance_to(query)?;
-                Rc::make_mut(&mut neighbor).set_distance(distance);
 
-                if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, &txn.txn)) {
-                    result.push(neighbor);
-                }
+        let mut result = BinaryHeap::with_capacity(m * cands.len());
+        let visited: DashSet<u128> = DashSet::new();
+
+        // 1) Collect neighbors (DB access stays outside parallel code because of &mut txn)
+        let mut all_neighbors: Vec<Arc<HVector>> = Vec::new();
+        for candidate in cands.iter() {
+            let mut neighs =
+                self._get_neighbors_with_vec_txn(txn, candidate.get_id(), level, filter)?;
+            all_neighbors.append(&mut neighs);
+        }
+
+        let start = std::time::Instant::now();
+
+        let new = all_neighbors
+            .par_chunks(64)
+            .flat_map(|chunk| {
+                chunk.into_iter()
+                    .filter(|neighbor| {
+                        if !visited.insert(neighbor.get_id()) {
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .map(|mut neighbor| {
+                        let distance = neighbor.distance_to(query).unwrap();
+                        Arc::make_mut(&mut neighbor).set_distance(distance);
+                        Arc::clone(neighbor)
+                    }).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        println!("time taken calc_neighbors: {:?}", start.elapsed());
+
+        let start = std::time::Instant::now();
+        for neighbor in new {
+            if filter.map_or(true, |fs| fs.iter().all(|f| f(&neighbor, &txn.txn))) {
+                result.push(neighbor);
             }
         }
+        println!("time taken filter_neighbors: {:?}", start.elapsed());
+
+        let start = std::time::Instant::now();
         result.extend_inord(cands);
-        Ok(result.take_inord(m))
+        let result = result.take_inord(m);
+        println!("time taken take_inord: {:?}", start.elapsed());
+        Ok(result)
     }
 
     fn _select_neighbors_with_lmdb_txn<'a, F>(
@@ -399,7 +431,7 @@ impl VectorCore {
         filter: Option<&[F]>,
     ) -> Result<BinaryHeap<HVector>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let m = self.config.m;
 
@@ -438,7 +470,7 @@ impl VectorCore {
         filter: Option<&[F]>,
     ) -> Result<BinaryHeap<HVector>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let mut visited: HashSet<u128> = HashSet::new();
         let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
@@ -501,20 +533,20 @@ impl VectorCore {
         &'a self,
         txn: &'a mut VecTxn,
         query: &'a HVector,
-        entry_point: &'a mut Rc<HVector>,
+        entry_point: &'a mut Arc<HVector>,
         ef: usize,
         level: usize,
         filter: Option<&[F]>,
-    ) -> Result<BinaryHeap<Rc<HVector>>, VectorError>
+    ) -> Result<BinaryHeap<Arc<HVector>>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let mut visited: HashSet<u128> = HashSet::new();
         let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
-        let mut results: BinaryHeap<Rc<HVector>> = BinaryHeap::new();
+        let mut results: BinaryHeap<Arc<HVector>> = BinaryHeap::new();
 
         let ep_distance = entry_point.distance_to(query)?;
-        Rc::get_mut(entry_point).unwrap().set_distance(ep_distance);
+        Arc::get_mut(entry_point).unwrap().set_distance(ep_distance);
         candidates.push(Candidate {
             id: entry_point.get_id(),
             distance: ep_distance,
@@ -544,10 +576,10 @@ impl VectorCore {
                     let distance = neighbor.distance_to(query).ok()?;
 
                     if max_distance.is_none_or(|max| distance < max) {
-                        let mut neighbor = Rc::unwrap_or_clone(neighbor);
+                        let mut neighbor = Arc::unwrap_or_clone(neighbor);
                         neighbor.set_distance(distance);
                         // neighbor.set_distance(distance);
-                        Some((Rc::new(neighbor), distance))
+                        Some((Arc::new(neighbor), distance))
                     } else {
                         None
                     }
@@ -616,7 +648,7 @@ impl HNSW for VectorCore {
         should_trickle: bool,
     ) -> Result<Vec<HVector>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let query = HVector::from_slice(0, query.to_vec());
 
@@ -670,9 +702,9 @@ impl HNSW for VectorCore {
         label: &str,
         filter: Option<&[F]>,
         should_trickle: bool,
-    ) -> Result<Vec<Rc<HVector>>, VectorError>
+    ) -> Result<Vec<Arc<HVector>>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let query = HVector::from_slice(0, query.to_vec());
 
@@ -728,9 +760,9 @@ impl HNSW for VectorCore {
         txn: &mut VecTxn,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
-    ) -> Result<Rc<HVector>, VectorError>
+    ) -> Result<Arc<HVector>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let new_level = self.get_new_level();
 
@@ -754,12 +786,13 @@ impl HNSW for VectorCore {
                         &bincode::serialize(&fields)?,
                     )?;
                 }
-                return Ok(Rc::new(query));
+                return Ok(Arc::new(query));
             }
         };
 
         let l = entry_point.get_level();
         let mut curr_ep = entry_point;
+        let start = std::time::Instant::now();
         for level in (new_level + 1..=l).rev() {
             let nearest =
                 self._search_level_with_vec_txn::<F>(txn, &query, &mut curr_ep, 1, level, None)?;
@@ -770,9 +803,12 @@ impl HNSW for VectorCore {
                 ))?
                 .clone();
         }
+        let time = start.elapsed();
+        println!("time taken search_level_1: {:?}", time);
 
-        let query = Rc::new(query);
+        let query = Arc::new(query);
         for level in (0..=l.min(new_level)).rev() {
+            let start = std::time::Instant::now();
             let nearest = self._search_level_with_vec_txn::<F>(
                 txn,
                 &query,
@@ -781,24 +817,47 @@ impl HNSW for VectorCore {
                 level,
                 None,
             )?;
+            let time = start.elapsed();
+            println!("time taken search_level_2: {:?}", time);
+
             curr_ep = nearest.peek().unwrap().clone();
 
-            let neighbors =
+            let start = std::time::Instant::now();
+            let neighbors: BinaryHeap<Arc<HVector>> =
                 self._select_neighbors_with_vec_txn::<F>(txn, &query, nearest, level, true, None)?;
-            self.set_neighbours_with_vec_txn(txn, Rc::clone(&query), &neighbors, level)?;
+            let time = start.elapsed();
+            println!("time taken select_neighbors_1: {:?}", time);
+
+            let start = std::time::Instant::now();
+            self.set_neighbours_with_vec_txn(txn, Arc::clone(&query), &neighbors, level)?;
+            let time = start.elapsed();
+            println!("time taken set_neighbours_1: {:?}", time);
+
             for e in neighbors {
                 let id = e.get_id();
+
+                let start = std::time::Instant::now();
                 let e_conns =
                     BinaryHeap::from(self._get_neighbors_with_vec_txn::<F>(txn, id, level, None)?);
+                let time = start.elapsed();
+                println!("time taken get_neighbors_1: {:?}", time);
+
+                let start = std::time::Instant::now();
                 let e_new_conn = self
                     ._select_neighbors_with_vec_txn::<F>(txn, &query, e_conns, level, true, None)?;
+                let time = start.elapsed();
+                println!("time taken select_neighbors_2: {:?}", time);
+
+                let start = std::time::Instant::now();
                 // neighbor_updates.push((id, e_new_conn));
                 self.set_neighbours_with_vec_txn(txn, e, &e_new_conn, level)?;
+                let time = start.elapsed();
+                println!("time taken set_neighbours_2: {:?}", time);
             }
         }
 
         if new_level > l {
-            self.set_entry_point_with_rc(txn.get_wtxn(), Rc::clone(&query))?;
+            self.set_entry_point_with_rc(txn.get_wtxn(), Arc::clone(&query))?;
         }
 
         if let Some(fields) = fields {
@@ -820,7 +879,7 @@ impl HNSW for VectorCore {
         fields: Option<Vec<(String, Value)>>,
     ) -> Result<HVector, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let new_level = self.get_new_level();
 

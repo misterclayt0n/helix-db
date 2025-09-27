@@ -425,7 +425,7 @@ mod tests {
             let start_time = Instant::now();
             let vec = index.insert_with_vec_txn::<Filter>(&mut txn, &data, None).unwrap();
             let time = start_time.elapsed();
-            base_all_vectors.push(Rc::unwrap_or_clone(vec));
+            base_all_vectors.push(Arc::unwrap_or_clone(vec));
             //println!("{} => inserting in {} ms", i, time.as_millis());
             if i % 500 == 0 {
                 println!("{} => inserting in {} ms", i, time.as_millis());

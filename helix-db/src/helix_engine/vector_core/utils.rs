@@ -4,7 +4,7 @@ use crate::{
     utils::filterable::Filterable,
 };
 use heed3::{Database, RoTxn, types::Bytes};
-use std::{cmp::Ordering, collections::BinaryHeap, rc::Rc};
+use std::{cmp::Ordering, collections::BinaryHeap, rc::Rc, sync::Arc};
 
 #[derive(PartialEq)]
 pub(super) struct Candidate {
@@ -93,9 +93,9 @@ pub trait VectorFilter {
         label: &str,
         txn: &RoTxn,
         db: Database<Bytes, Bytes>,
-    ) -> Result<Vec<Rc<HVector>>, VectorError>
+    ) -> Result<Vec<Arc<HVector>>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool;
+        F: Fn(&HVector, &RoTxn) -> bool + Sync;
     
     fn to_vec_with_filter<F, const SHOULD_CHECK_DELETED: bool>(
         &mut self,
@@ -106,10 +106,10 @@ pub trait VectorFilter {
         db: Database<Bytes, Bytes>,
     ) -> Result<Vec<HVector>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool;
+        F: Fn(&HVector, &RoTxn) -> bool + Sync;
 }
 
-impl VectorFilter for BinaryHeap<Rc<HVector>> {
+impl VectorFilter for BinaryHeap<Arc<HVector>> {
     #[inline(always)]
     fn to_rc_vec_with_filter<F, const SHOULD_CHECK_DELETED: bool>(
         &mut self,
@@ -118,15 +118,15 @@ impl VectorFilter for BinaryHeap<Rc<HVector>> {
         label: &str,
         txn: &RoTxn,
         db: Database<Bytes, Bytes>,
-    ) -> Result<Vec<Rc<HVector>>, VectorError>
+    ) -> Result<Vec<Arc<HVector>>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let mut result = Vec::with_capacity(k);
         for _ in 0..k {
             // while pop check filters and pop until one passes
             while let Some(mut item) = self.pop() {
-                if let Some(item) = Rc::get_mut(&mut item) {
+                if let Some(item) = Arc::get_mut(&mut item) {
                     item.properties = match db.get(txn, &item.get_id().to_be_bytes())? {
                         Some(bytes) => {
                             Some(bincode::deserialize(bytes).map_err(VectorError::from)?)
@@ -163,7 +163,7 @@ impl VectorFilter for BinaryHeap<Rc<HVector>> {
         _db: Database<Bytes, Bytes>,
     ) -> Result<Vec<HVector>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         unimplemented!()
     }
@@ -178,9 +178,9 @@ impl VectorFilter for BinaryHeap<HVector> {
         _label: &str,
         _txn: &RoTxn,
         _db: Database<Bytes, Bytes>,
-    ) -> Result<Vec<Rc<HVector>>, VectorError>
+    ) -> Result<Vec<Arc<HVector>>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         unimplemented!()
     }
@@ -195,7 +195,7 @@ impl VectorFilter for BinaryHeap<HVector> {
         db: Database<Bytes, Bytes>,
     ) -> Result<Vec<HVector>, VectorError>
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool + Sync,
     {
         let mut result = Vec::with_capacity(k);
         for _ in 0..k {

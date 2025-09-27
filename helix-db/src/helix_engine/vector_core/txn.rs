@@ -2,10 +2,11 @@ use std::{
     collections::{BinaryHeap, HashMap, HashSet},
     ops::Deref,
     rc::Rc,
+    sync::Arc,
 };
 
 use heed3::{
-    Database, RoTxn, RwTxn, WithoutTls,
+    Database, PutFlags, RoTxn, RwTxn, WithoutTls,
     types::{Bytes, Unit},
 };
 
@@ -16,7 +17,7 @@ use crate::helix_engine::{
 
 pub struct VecTxn<'env> {
     pub txn: RwTxn<'env>,
-    pub cache: HashMap<(u128, usize), HashSet<Rc<HVector>>>,
+    pub cache: HashMap<(u128, usize), HashSet<Arc<HVector>>>,
 }
 
 impl<'env> VecTxn<'env> {
@@ -29,12 +30,12 @@ impl<'env> VecTxn<'env> {
 
     pub fn set_neighbors(
         &mut self,
-        curr_vec: Rc<HVector>,
+        curr_vec: Arc<HVector>,
         level: usize,
-        neighbors: &BinaryHeap<Rc<HVector>>,
+        neighbors: &BinaryHeap<Arc<HVector>>,
     ) {
         // get change sets in neighbors
-        let neighbors = neighbors.iter().map(Rc::clone).collect::<HashSet<_>>();
+        let neighbors = neighbors.iter().map(Arc::clone).collect::<HashSet<_>>();
 
         let old_neighbors = self
             .cache
@@ -57,20 +58,20 @@ impl<'env> VecTxn<'env> {
             self.cache
                 .entry((neighbor.get_id(), level))
                 .or_insert_with(HashSet::new)
-                .insert(Rc::clone(&curr_vec));
+                .insert(Arc::clone(&curr_vec));
         }
 
         self.cache.insert((curr_vec.get_id(), level), neighbors);
     }
 
-    pub fn get_neighbors(&self, id: u128, level: usize) -> Option<Vec<Rc<HVector>>> {
+    pub fn get_neighbors(&self, id: u128, level: usize) -> Option<Vec<Arc<HVector>>> {
         self.cache
             .get(&(id, level))
-            .map(|x| x.iter().map(Rc::clone).collect())
+            .map(|x| x.iter().map(Arc::clone).collect())
     }
 
-    pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<Rc<HVector>>) {
-        let neighbors = neighbors.iter().map(Rc::clone).collect::<HashSet<_>>();
+    pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<Arc<HVector>>) {
+        let neighbors = neighbors.iter().map(Arc::clone).collect::<HashSet<_>>();
         self.cache.entry((id, level)).or_default().extend(neighbors);
     }
 
@@ -85,6 +86,7 @@ impl<'env> VecTxn<'env> {
     pub fn commit(mut self, db: &Database<Bytes, Unit>) -> Result<(), VectorError> {
         let txn = &mut self.txn;
         let mut vec = HashSet::with_capacity(self.cache.len() * 128);
+        let mut vecs = 0;
         for (id, level) in self.cache.keys() {
             if let Some(neighbors) = self.cache.get(&(*id, *level)) {
                 for neighbor in neighbors {
@@ -96,6 +98,7 @@ impl<'env> VecTxn<'env> {
                     vec.insert(out_key);
                     vec.insert(in_key);
                 }
+                vecs += 1;
             }
         }
         // vec.sort();
