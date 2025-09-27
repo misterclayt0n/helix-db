@@ -367,14 +367,15 @@ impl VectorCore {
         let mut visited: HashSet<u128> = HashSet::new();
         let mut result = BinaryHeap::with_capacity(m * cands.len());
         for candidate in cands.iter() {
-            for neighbor in
+            for mut neighbor in
                 self._get_neighbors_with_vec_txn(txn, candidate.get_id(), level, filter)?
             {
                 if !visited.insert(neighbor.get_id()) {
                     continue;
                 }
                 let distance = neighbor.distance_to(query)?;
-                txn.set_distance(neighbor.get_id(), level, distance);
+                Rc::make_mut(&mut neighbor).set_distance(distance);
+                
 
                 if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, &txn.txn)) {
                     result.push(neighbor);

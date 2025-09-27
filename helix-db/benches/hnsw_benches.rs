@@ -501,6 +501,7 @@ mod tests {
             test_id, total_recall, total_precision,
         );
         assert!(total_recall >= 0.8, "recall not high enough!");
+        assert!(false);
     }
 }
 

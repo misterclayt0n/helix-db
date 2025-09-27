@@ -17,7 +17,6 @@ use crate::helix_engine::{
 pub struct VecTxn<'env> {
     pub txn: RwTxn<'env>,
     pub cache: HashMap<(u128, usize), HashSet<Rc<HVector>>>,
-    pub cache_distances: HashMap<(u128, usize), f64>,
 }
 
 impl<'env> VecTxn<'env> {
@@ -25,7 +24,6 @@ impl<'env> VecTxn<'env> {
         Self {
             txn,
             cache: HashMap::with_capacity(256),
-            cache_distances: HashMap::with_capacity(256),
         }
     }
 
@@ -38,45 +36,38 @@ impl<'env> VecTxn<'env> {
         // get change sets in neighbors
         let neighbors = neighbors.iter().map(Rc::clone).collect::<HashSet<_>>();
 
-        // let old_neighbors = self
-        //     .cache
-        //     .get(&(curr_vec.get_id(), level))
-        //     .cloned()
-        //     .unwrap_or_default();
-        // let old_neighbors_to_delete = old_neighbors
-        //     .difference(&neighbors)
-        //     .map(Rc::clone)
-        //     .collect::<HashSet<_>>();
+        let old_neighbors = self
+            .cache
+            .get(&(curr_vec.get_id(), level))
+            .cloned()
+            .unwrap_or_default();
+        let old_neighbors_to_delete = old_neighbors
+            .difference(&neighbors)
+            .map(Rc::clone)
+            .collect::<HashSet<_>>();
 
-        // let neighbors_to_add = neighbors
-        //     .difference(&old_neighbors)
-        //     .map(Rc::clone)
-        //     .collect::<HashSet<_>>();
+        let neighbors_to_add = neighbors
+            .difference(&old_neighbors)
+            .map(Rc::clone)
+            .collect::<HashSet<_>>();
 
-        // for neighbor in old_neighbors_to_delete {
-        //     if let Some(neighbor_set) = self.cache.get_mut(&(neighbor.get_id(), level)) {
-        //         neighbor_set.remove(&curr_vec);
-        //     }
-        // }
+        for neighbor in old_neighbors_to_delete {
+            if let Some(neighbor_set) = self.cache.get_mut(&(neighbor.get_id(), level)) {
+                neighbor_set.remove(&curr_vec);
+            }
+        }
 
-        // for neighbor in neighbors_to_add {
-        //     if neighbor.get_id() == curr_vec.get_id() {
-        //         continue;
-        //     }
-        //     self.cache
-        //         .entry((neighbor.get_id(), level))
-        //         .or_insert_with(HashSet::new)
-        //         .insert(Rc::clone(&curr_vec));
-        // }
+        for neighbor in neighbors_to_add {
+            if neighbor.get_id() == curr_vec.get_id() {
+                continue;
+            }
+            self.cache
+                .entry((neighbor.get_id(), level))
+                .or_insert_with(HashSet::new)
+                .insert(Rc::clone(&curr_vec));
+        }
 
         self.cache.insert((curr_vec.get_id(), level), neighbors);
-    }
-
-    pub fn set_distance(&mut self, id: u128, level: usize, distance: f64) {
-        self.cache_distances.insert((id, level), distance);
-    }
-    pub fn get_distance(&self, id: u128, level: usize) -> f64 {
-        *self.cache_distances.get(&(id, level)).unwrap_or(&2.0)
     }
 
     pub fn get_neighbors(&self, id: u128, level: usize) -> Option<Vec<Rc<HVector>>> {
@@ -120,8 +111,6 @@ impl<'env> VecTxn<'env> {
             }
         }
         // vec.sort();
-        println!("inserting: {:?}", vec.len());
-        println!("vecs: {:?}", vecs);
         for key in vec {
             // db.put_with_flags(txn, PutFlags::APPEND, &key, &())?;
             db.put(txn, &key, &())?;
