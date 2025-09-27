@@ -5,7 +5,7 @@ use std::{
 };
 
 use heed3::{
-    Database, PutFlags, RoTxn, RwTxn, WithoutTls,
+    Database, RoTxn, RwTxn, WithoutTls,
     types::{Bytes, Unit},
 };
 
@@ -38,27 +38,20 @@ impl<'env> VecTxn<'env> {
 
         let old_neighbors = self
             .cache
-            .get(&(curr_vec.get_id(), level))
-            .cloned()
+            .remove(&(curr_vec.get_id(), level))
             .unwrap_or_default();
-        let old_neighbors_to_delete = old_neighbors
-            .difference(&neighbors)
-            .map(Rc::clone)
-            .collect::<HashSet<_>>();
 
-        let neighbors_to_add = neighbors
-            .difference(&old_neighbors)
-            .map(Rc::clone)
-            .collect::<HashSet<_>>();
-
-        for neighbor in old_neighbors_to_delete {
-            if let Some(neighbor_set) = self.cache.get_mut(&(neighbor.get_id(), level)) {
+        for old_neighbor in &old_neighbors {
+            if neighbors.contains(old_neighbor) {
+                continue;
+            }
+            if let Some(neighbor_set) = self.cache.get_mut(&(old_neighbor.get_id(), level)) {
                 neighbor_set.remove(&curr_vec);
             }
         }
 
-        for neighbor in neighbors_to_add {
-            if neighbor.get_id() == curr_vec.get_id() {
+        for neighbor in &neighbors {
+            if neighbor.get_id() == curr_vec.get_id() || old_neighbors.contains(neighbor) {
                 continue;
             }
             self.cache
@@ -78,10 +71,7 @@ impl<'env> VecTxn<'env> {
 
     pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<Rc<HVector>>) {
         let neighbors = neighbors.iter().map(Rc::clone).collect::<HashSet<_>>();
-        self.cache
-            .entry((id, level))
-            .and_modify(|x| x.extend(neighbors.clone()))
-            .or_insert(neighbors);
+        self.cache.entry((id, level)).or_default().extend(neighbors);
     }
 
     pub fn get_rtxn(&self) -> &RoTxn<'env, WithoutTls> {
@@ -95,7 +85,6 @@ impl<'env> VecTxn<'env> {
     pub fn commit(mut self, db: &Database<Bytes, Unit>) -> Result<(), VectorError> {
         let txn = &mut self.txn;
         let mut vec = HashSet::with_capacity(self.cache.len() * 128);
-        let mut vecs = 0;
         for (id, level) in self.cache.keys() {
             if let Some(neighbors) = self.cache.get(&(*id, *level)) {
                 for neighbor in neighbors {
@@ -107,7 +96,6 @@ impl<'env> VecTxn<'env> {
                     vec.insert(out_key);
                     vec.insert(in_key);
                 }
-                vecs += 1;
             }
         }
         // vec.sort();

@@ -364,6 +364,45 @@ impl VectorCore {
             return Ok(cands.take_inord(m));
         }
 
+        /* 
+        let start = std::time::Instant::now();
+
+        
+        let new = cands
+            .iter()
+            .map(|candidate| {
+                let start = std::time::Instant::now();
+                let neighbors = self
+                    ._get_neighbors_with_vec_txn(txn, candidate.get_id(), level, filter)
+                    .unwrap();
+                println!("time taken get_neighbors: {:?}", start.elapsed());
+                let ns = neighbors
+                    .into_par_iter()
+                    .filter_map(|mut neighbor| {
+                        let distance = neighbor.distance_to(query).unwrap();
+                        Arc::make_mut(&mut neighbor).set_distance(distance);
+                        Some(neighbor)
+                    })
+                    .collect::<Vec<_>>();
+
+                ns
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+
+        println!("time taken calc_neighbors: {:?}", start.elapsed());
+
+        let mut result = BinaryHeap::with_capacity(m * cands.len());
+        let mut visited: std::collections::HashSet<u128> = std::collections::HashSet::new();
+        for neighbor in new {
+            if !visited.insert(neighbor.get_id()) {
+                continue;
+            }
+            if filter.map_or(true, |fs| fs.iter().all(|f| f(&neighbor, &txn.txn))) {
+                result.push(neighbor);
+            }
+        }
+         */
         let mut visited: HashSet<u128> = HashSet::new();
         let mut result = BinaryHeap::with_capacity(m * cands.len());
         for candidate in cands.iter() {
