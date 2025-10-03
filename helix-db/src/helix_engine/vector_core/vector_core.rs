@@ -4,6 +4,7 @@ use crate::{
         types::VectorError,
         vector_core::{
             hnsw::HNSW,
+            txn::VecTxn,
             utils::{Candidate, HeapOps, VectorFilter},
             vector::HVector,
         },
@@ -17,7 +18,10 @@ use heed3::{
 use itertools::Itertools;
 use rand::prelude::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::{
+    collections::{BinaryHeap, HashMap, HashSet},
+    rc::Rc,
+};
 
 const DB_VECTORS: &str = "vectors"; // for vector data (v:)
 const DB_VECTOR_DATA: &str = "vector_data"; // for vector data (v:)
@@ -87,7 +91,7 @@ impl VectorCore {
     }
 
     #[inline(always)]
-    fn out_edges_key(source_id: u128, level: usize, sink_id: Option<u128>) -> Vec<u8> {
+    pub fn out_edges_key(source_id: u128, level: usize, sink_id: Option<u128>) -> Vec<u8> {
         match sink_id {
             Some(sink_id) => [
                 source_id.to_be_bytes().as_slice(),
@@ -110,6 +114,23 @@ impl VectorCore {
         let mut rng = rand::rng();
         let r: f64 = rng.random::<f64>();
         (-r.ln() * self.config.m_l).floor() as usize
+    }
+
+    #[inline]
+    fn get_entry_point_rc(&self, txn: &RoTxn) -> Result<Rc<HVector>, VectorError> {
+        let ep_id = self.vectors_db.get(txn, ENTRY_POINT_KEY.as_bytes())?;
+        if let Some(ep_id) = ep_id {
+            let mut arr = [0u8; 16];
+            let len = std::cmp::min(ep_id.len(), 16);
+            arr[..len].copy_from_slice(&ep_id[..len]);
+
+            let ep = self
+                .get_vector(txn, u128::from_be_bytes(arr), 0, true)
+                .map_err(|_| VectorError::EntryPointNotFound)?;
+            Ok(Rc::new(ep))
+        } else {
+            Err(VectorError::EntryPointNotFound)
+        }
     }
 
     #[inline]
@@ -138,6 +159,18 @@ impl VectorCore {
         Ok(())
     }
 
+    #[inline]
+    fn set_entry_point_with_rc(
+        &self,
+        txn: &mut RwTxn,
+        entry: Rc<HVector>,
+    ) -> Result<(), VectorError> {
+        let entry_key = ENTRY_POINT_KEY.as_bytes().to_vec();
+        self.vectors_db
+            .put(txn, &entry_key, &entry.get_id().to_be_bytes())?;
+        Ok(())
+    }
+
     #[inline(always)]
     fn put_vector(&self, txn: &mut RwTxn, vector: &HVector) -> Result<(), VectorError> {
         self.vectors_db
@@ -150,8 +183,63 @@ impl VectorCore {
         Ok(())
     }
 
+    #[inline]
+    fn _get_neighbors_with_vec_txn<F>(
+        &self,
+        txn: &mut VecTxn,
+        id: u128,
+        level: usize,
+        filter: Option<&[F]>,
+    ) -> Result<Vec<Rc<HVector>>, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool,
+    {
+        if let Some(neighbors) = txn.get_neighbors(id, level) {
+            return Ok(neighbors);
+        }
+
+        let out_key = Self::out_edges_key(id, level, None);
+        let mut neighbors = Vec::with_capacity(self.config.m_max_0.min(self.config.min_neighbors));
+
+        let iter = self
+            .edges_db
+            .lazily_decode_data()
+            .prefix_iter(txn, &out_key)?;
+
+        let prefix_len = out_key.len();
+
+        for result in iter {
+            let (key, _) = result?;
+
+            let mut arr = [0u8; 16];
+            let len = std::cmp::min(key.len(), 16);
+            arr[..len].copy_from_slice(&key[prefix_len..(prefix_len + len)]);
+            let neighbor_id = u128::from_be_bytes(arr);
+
+            if neighbor_id == id {
+                continue;
+            }
+
+            let vector = self.get_vector(txn, neighbor_id, level, false)?;
+
+            let passes_filters = match filter {
+                Some(filter_slice) => filter_slice.iter().all(|f| f(&vector, txn)),
+                None => true,
+            };
+
+            if passes_filters {
+                neighbors.push(Rc::new(vector));
+            }
+        }
+        neighbors.shrink_to_fit();
+
+        txn.insert_neighbors(id, level, &neighbors);
+
+        Ok(neighbors)
+    }
+
     #[inline(always)]
-    fn get_neighbors<F>(
+    fn _get_neighbors_with_lmdb_txn<F>(
         &self,
         txn: &RoTxn,
         id: u128,
@@ -200,7 +288,19 @@ impl VectorCore {
     }
 
     #[inline(always)]
-    fn set_neighbours(
+    fn set_neighbours_with_vec_txn(
+        &self,
+        txn: &mut VecTxn,
+        curr_vec: Rc<HVector>,
+        neighbors: &BinaryHeap<Rc<HVector>>,
+        level: usize,
+    ) -> Result<(), VectorError> {
+        txn.set_neighbors(curr_vec, level, neighbors);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn set_neighbours_with_lmdb_txn(
         &self,
         txn: &mut RwTxn,
         id: u128,
@@ -241,9 +341,47 @@ impl VectorCore {
         Ok(())
     }
 
-    fn select_neighbors<'a, F>(
+    fn _select_neighbors_with_vec_txn<'a, F>(
         &'a self,
-        txn: &RoTxn,
+        txn: &'a mut VecTxn,
+        query: &'a HVector,
+        mut cands: BinaryHeap<Rc<HVector>>,
+        level: usize,
+        should_extend: bool,
+        filter: Option<&[F]>,
+    ) -> Result<BinaryHeap<Rc<HVector>>, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool,
+    {
+        let m = self.config.m;
+
+        if !should_extend {
+            return Ok(cands.take_inord(m));
+        }
+        let mut visited: HashSet<u128> = HashSet::new();
+        let mut result = BinaryHeap::with_capacity(m * cands.len());
+        for candidate in cands.iter() {
+            for mut neighbor in
+                self._get_neighbors_with_vec_txn(txn, candidate.get_id(), level, filter)?
+            {
+                if !visited.insert(neighbor.get_id()) {
+                    continue;
+                }
+                let distance = neighbor.distance_to(query)?;
+                Rc::make_mut(&mut neighbor).set_distance(distance);
+
+                if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, &txn.txn)) {
+                    result.push(neighbor);
+                }
+            }
+        }
+        result.extend_inord(cands);
+        Ok(result.take_inord(m))
+    }
+
+    fn _select_neighbors_with_lmdb_txn<'a, F>(
+        &'a self,
+        txn: &'a RoTxn,
         query: &'a HVector,
         mut cands: BinaryHeap<HVector>,
         level: usize,
@@ -262,25 +400,15 @@ impl VectorCore {
         let mut visited: HashSet<u128> = HashSet::new();
         let mut result = BinaryHeap::with_capacity(m * cands.len());
         for candidate in cands.iter() {
-            for mut neighbor in self.get_neighbors(txn, candidate.get_id(), level, filter)? {
+            for mut neighbor in
+                self._get_neighbors_with_lmdb_txn(txn, candidate.get_id(), level, filter)?
+            {
                 if !visited.insert(neighbor.get_id()) {
                     continue;
                 }
-
                 neighbor.set_distance(neighbor.distance_to(query)?);
 
-                /*
-                let passes_filters = match filter {
-                    Some(filter_slice) => filter_slice.iter().all(|f| f(&neighbor, txn)),
-                    None => true,
-                };
-
-                if passes_filters {
-                    result.push(neighbor);
-                }
-                */
-
-                if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, txn)) {
+                if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, &txn)) {
                     result.push(neighbor);
                 }
             }
@@ -290,9 +418,9 @@ impl VectorCore {
         Ok(result.take_inord(m))
     }
 
-    fn search_level<'a, F>(
+    fn _search_level_with_lmdb_txn<'a, F>(
         &'a self,
-        txn: &RoTxn,
+        txn: &'a RoTxn,
         query: &'a HVector,
         entry_point: &'a mut HVector,
         ef: usize,
@@ -329,7 +457,7 @@ impl VectorCore {
                 None
             };
 
-            self.get_neighbors(txn, curr_cand.id, level, filter)?
+            self._get_neighbors_with_lmdb_txn(txn, curr_cand.id, level, filter)?
                 .into_iter()
                 .filter(|neighbor| visited.insert(neighbor.get_id()))
                 .filter_map(|mut neighbor| {
@@ -337,7 +465,79 @@ impl VectorCore {
 
                     if max_distance.is_none_or(|max| distance < max) {
                         neighbor.set_distance(distance);
+                        // neighbor.set_distance(distance);
                         Some((neighbor, distance))
+                    } else {
+                        None
+                    }
+                })
+                .for_each(|(neighbor, distance)| {
+                    candidates.push(Candidate {
+                        id: neighbor.get_id(),
+                        distance,
+                    });
+
+                    results.push(neighbor);
+
+                    if results.len() > ef {
+                        results = results.take_inord(ef);
+                    }
+                });
+        }
+        Ok(results)
+    }
+
+    fn _search_level_with_vec_txn<'a, F>(
+        &'a self,
+        txn: &'a mut VecTxn,
+        query: &'a HVector,
+        entry_point: &'a mut Rc<HVector>,
+        ef: usize,
+        level: usize,
+        filter: Option<&[F]>,
+    ) -> Result<BinaryHeap<Rc<HVector>>, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool,
+    {
+        let mut visited: HashSet<u128> = HashSet::new();
+        let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
+        let mut results: BinaryHeap<Rc<HVector>> = BinaryHeap::new();
+
+        let ep_distance = entry_point.distance_to(query)?;
+        Rc::get_mut(entry_point).unwrap().set_distance(ep_distance);
+        candidates.push(Candidate {
+            id: entry_point.get_id(),
+            distance: ep_distance,
+        });
+        results.push(entry_point.clone());
+        visited.insert(entry_point.get_id());
+
+        while let Some(curr_cand) = candidates.pop() {
+            if results.len() >= ef
+                && results
+                    .get_max()
+                    .is_none_or(|f| curr_cand.distance > f.get_distance())
+            {
+                break;
+            }
+
+            let max_distance = if results.len() >= ef {
+                results.get_max().map(|f| f.get_distance())
+            } else {
+                None
+            };
+
+            self._get_neighbors_with_vec_txn(txn, curr_cand.id, level, filter)?
+                .into_iter()
+                .filter(|neighbor| visited.insert(neighbor.get_id()))
+                .filter_map(|neighbor| {
+                    let distance = neighbor.distance_to(query).ok()?;
+
+                    if max_distance.is_none_or(|max| distance < max) {
+                        let mut neighbor = Rc::unwrap_or_clone(neighbor);
+                        neighbor.set_distance(distance);
+                        // neighbor.set_distance(distance);
+                        Some((Rc::new(neighbor), distance))
                     } else {
                         None
                     }
@@ -416,7 +616,7 @@ impl HNSW for VectorCore {
         let curr_level = entry_point.get_level();
 
         for level in (1..=curr_level).rev() {
-            let mut nearest = self.search_level(
+            let mut nearest = self._search_level_with_lmdb_txn(
                 txn,
                 &query,
                 &mut entry_point,
@@ -433,7 +633,7 @@ impl HNSW for VectorCore {
             }
         }
 
-        let mut candidates = self.search_level(
+        let mut candidates = self._search_level_with_lmdb_txn(
             txn,
             &query,
             &mut entry_point,
@@ -452,7 +652,158 @@ impl HNSW for VectorCore {
         Ok(results)
     }
 
-    fn insert<F>(
+    fn search_with_vec_txn<F>(
+        &self,
+        txn: &mut VecTxn,
+        query: &[f64],
+        k: usize,
+        label: &str,
+        filter: Option<&[F]>,
+        should_trickle: bool,
+    ) -> Result<Vec<Rc<HVector>>, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool,
+    {
+        let query = HVector::from_slice(0, query.to_vec());
+
+        let mut entry_point = self.get_entry_point_rc(txn.get_rtxn())?;
+
+        let ef = self.config.ef;
+        let curr_level = entry_point.get_level();
+
+        for level in (1..=curr_level).rev() {
+            let mut nearest = self._search_level_with_vec_txn(
+                txn,
+                &query,
+                &mut entry_point,
+                1,
+                level,
+                match should_trickle {
+                    true => filter,
+                    false => None,
+                },
+            )?;
+
+            if let Some(closest) = nearest.pop() {
+                entry_point = closest;
+            }
+        }
+
+        let mut candidates = self._search_level_with_vec_txn(
+            txn,
+            &query,
+            &mut entry_point,
+            ef,
+            0,
+            match should_trickle {
+                true => filter,
+                false => None,
+            },
+        )?;
+
+        let results = candidates.to_rc_vec_with_filter::<F, true>(
+            k,
+            filter,
+            label,
+            txn,
+            self.vector_data_db,
+        )?;
+
+        debug_println!("vector search found {} results", results.len());
+        Ok(results)
+    }
+
+    fn insert_with_vec_txn<F>(
+        &self,
+        txn: &mut VecTxn,
+        data: &[f64],
+        fields: Option<Vec<(String, Value)>>,
+    ) -> Result<Rc<HVector>, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool,
+    {
+        let new_level = self.get_new_level();
+
+        let mut query = HVector::from_slice(0, data.to_vec());
+        self.put_vector(txn.get_wtxn(), &query)?;
+        query.level = new_level;
+        if new_level > 0 {
+            self.put_vector(txn.get_wtxn(), &query)?;
+        }
+
+        let entry_point = match self.get_entry_point_rc(txn.get_wtxn()) {
+            Ok(ep) => ep,
+            Err(_) => {
+                self.set_entry_point(txn.get_wtxn(), &query)?;
+                query.set_distance(0.0);
+
+                if let Some(fields) = fields {
+                    self.vector_data_db.put(
+                        txn.get_wtxn(),
+                        &query.get_id().to_be_bytes(),
+                        &bincode::serialize(&fields)?,
+                    )?;
+                }
+                return Ok(Rc::new(query));
+            }
+        };
+
+        let l = entry_point.get_level();
+        let mut curr_ep = entry_point;
+        for level in (new_level + 1..=l).rev() {
+            let nearest =
+                self._search_level_with_vec_txn::<F>(txn, &query, &mut curr_ep, 1, level, None)?;
+            curr_ep = nearest
+                .peek()
+                .ok_or(VectorError::VectorCoreError(
+                    "emtpy search result".to_string(),
+                ))?
+                .clone();
+        }
+
+        let query = Rc::new(query);
+        for level in (0..=l.min(new_level)).rev() {
+            let nearest = self._search_level_with_vec_txn::<F>(
+                txn,
+                &query,
+                &mut curr_ep,
+                self.config.ef_construct,
+                level,
+                None,
+            )?;
+            curr_ep = nearest.peek().unwrap().clone();
+
+            let neighbors =
+                self._select_neighbors_with_vec_txn::<F>(txn, &query, nearest, level, true, None)?;
+            self.set_neighbours_with_vec_txn(txn, Rc::clone(&query), &neighbors, level)?;
+            for e in neighbors {
+                let id = e.get_id();
+                let e_conns =
+                    BinaryHeap::from(self._get_neighbors_with_vec_txn::<F>(txn, id, level, None)?);
+                let e_new_conn = self
+                    ._select_neighbors_with_vec_txn::<F>(txn, &query, e_conns, level, true, None)?;
+                // neighbor_updates.push((id, e_new_conn));
+                self.set_neighbours_with_vec_txn(txn, e, &e_new_conn, level)?;
+            }
+        }
+
+        if new_level > l {
+            self.set_entry_point_with_rc(txn.get_wtxn(), Rc::clone(&query))?;
+        }
+
+        if let Some(fields) = fields {
+            self.vector_data_db.put(
+                txn.get_wtxn(),
+                &query.get_id().to_be_bytes(),
+                &bincode::serialize(&fields)?,
+            )?;
+        }
+
+        debug_println!("vector inserted with id {}", query.get_id());
+        Ok(query)
+    }
+
+    fn insert_with_lmdb_txn<F>(
         &self,
         txn: &mut RwTxn,
         data: &[f64],
@@ -490,7 +841,8 @@ impl HNSW for VectorCore {
         let l = entry_point.get_level();
         let mut curr_ep = entry_point;
         for level in (new_level + 1..=l).rev() {
-            let nearest = self.search_level::<F>(txn, &query, &mut curr_ep, 1, level, None)?;
+            let nearest =
+                self._search_level_with_lmdb_txn::<F>(txn, &query, &mut curr_ep, 1, level, None)?;
             curr_ep = nearest
                 .peek()
                 .ok_or(VectorError::VectorCoreError(
@@ -500,7 +852,7 @@ impl HNSW for VectorCore {
         }
 
         for level in (0..=l.min(new_level)).rev() {
-            let nearest = self.search_level::<F>(
+            let nearest = self._search_level_with_lmdb_txn::<F>(
                 txn,
                 &query,
                 &mut curr_ep,
@@ -515,15 +867,18 @@ impl HNSW for VectorCore {
                 ))?
                 .clone();
 
-            let neighbors = self.select_neighbors::<F>(txn, &query, nearest, level, true, None)?;
-            self.set_neighbours(txn, query.get_id(), &neighbors, level)?;
-
-            for e in neighbors {
+            let neighbors =
+                self._select_neighbors_with_lmdb_txn::<F>(txn, &query, nearest, level, true, None)?;
+            self.set_neighbours_with_lmdb_txn(txn, query.get_id(), &neighbors, level)?;
+            for e in &neighbors {
                 let id = e.get_id();
-                let e_conns = BinaryHeap::from(self.get_neighbors::<F>(txn, id, level, None)?);
-                let e_new_conn =
-                    self.select_neighbors::<F>(txn, &query, e_conns, level, true, None)?;
-                self.set_neighbours(txn, id, &e_new_conn, level)?;
+                let e_conns =
+                    BinaryHeap::from(self._get_neighbors_with_lmdb_txn::<F>(txn, id, level, None)?);
+                let e_new_conn = self._select_neighbors_with_lmdb_txn::<F>(
+                    txn, &query, e_conns, level, true, None,
+                )?;
+                // neighbor_updates.push((id, e_new_conn));
+                self.set_neighbours_with_lmdb_txn(txn, id, &e_new_conn, level)?;
             }
         }
 

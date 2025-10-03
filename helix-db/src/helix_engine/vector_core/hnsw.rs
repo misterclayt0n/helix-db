@@ -1,9 +1,11 @@
-use crate::{helix_engine::types::VectorError, protocol::value::Value};
+use std::rc::Rc;
+
+use crate::helix_engine::vector_core::txn::VecTxn;
 use crate::helix_engine::vector_core::vector::HVector;
+use crate::{helix_engine::types::VectorError, protocol::value::Value};
 use heed3::{RoTxn, RwTxn};
 
-pub trait HNSW
-{
+pub trait HNSW {
     /// Search for the k nearest neighbors of a query vector
     ///
     /// # Arguments
@@ -27,6 +29,18 @@ pub trait HNSW
     where
         F: Fn(&HVector, &RoTxn) -> bool;
 
+    fn search_with_vec_txn<F>(
+        &self,
+        txn: &mut VecTxn,
+        query: &[f64],
+        k: usize,
+        label: &str,
+        filter: Option<&[F]>,
+        should_trickle: bool,
+    ) -> Result<Vec<Rc<HVector>>, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool;
+
     /// Insert a new vector into the index
     ///
     /// # Arguments
@@ -37,12 +51,21 @@ pub trait HNSW
     /// # Returns
     ///
     /// An HVector of the data inserted
-    fn insert<F>(
+    fn insert_with_lmdb_txn<F>(
         &self,
         txn: &mut RwTxn,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
     ) -> Result<HVector, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool;
+
+    fn insert_with_vec_txn<F>(
+        &self,
+        txn: &mut VecTxn,
+        data: &[f64],
+        fields: Option<Vec<(String, Value)>>,
+    ) -> Result<Rc<HVector>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool;
 
@@ -68,11 +91,7 @@ pub trait HNSW
     ///
     /// * `txn` - The transaction to use
     /// * `id` - The id of the vector
-    fn delete(
-        &self,
-        txn: &mut RwTxn,
-        id: u128,
-    ) -> Result<(), VectorError>;
+    fn delete(&self, txn: &mut RwTxn, id: u128) -> Result<(), VectorError>;
 
     /// Get specific vector based on id and level
     ///
@@ -94,4 +113,3 @@ pub trait HNSW
         with_data: bool,
     ) -> Result<HVector, VectorError>;
 }
-
