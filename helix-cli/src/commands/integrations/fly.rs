@@ -531,17 +531,51 @@ impl<'a> FlyManager<'a> {
     pub async fn delete_app(&self, instance_name: &str) -> Result<()> {
         let app_name = self.app_name(instance_name);
 
-        print_status("FLY", &format!("Deleting Fly.io app '{app_name}'"));
+        print_status("FLY", &format!("Deleting Fly.io app '{app_name}'..."));
 
         let delete_status = self
             .run_fly_command_async(&["apps", "destroy", &app_name, "--yes"])
             .await?;
 
         if !delete_status.status.success() {
-            return Err(eyre!("Failed to delete Fly.io app '{app_name}'"));
+            let stderr = String::from_utf8_lossy(&delete_status.stderr);
+            let stdout = String::from_utf8_lossy(&delete_status.stdout);
+
+            if stderr.contains("Could not find App") ||
+               stdout.contains("Could not find App") ||
+               stderr.contains("not found") ||
+               stdout.contains("not found") {
+                print_status("FLY", &format!("App '{app_name}' does not exist (already deleted)"));
+                return Ok(());
+            }
+
+            if stderr.contains("authentication") ||
+               stderr.contains("unauthorized") ||
+               stdout.contains("authentication") ||
+               stdout.contains("unauthorized") ||
+               stderr.contains("not logged in") ||
+               stdout.contains("not logged in") {
+                return Err(eyre!(
+                    "Fly.io authentication failed. Please run 'flyctl auth login' and try again."
+                ));
+            }
+
+            if stderr.contains("network") ||
+               stderr.contains("connection") ||
+               stdout.contains("network") ||
+               stdout.contains("connection") {
+                return Err(eyre!(
+                    "Network error while connecting to Fly.io. Please check your internet connection and try again."
+                ));
+            }
+
+            return Err(eyre!(
+                "Failed to delete Fly.io app '{app_name}': {}",
+                if stderr.is_empty() { stdout } else { stderr }
+            ));
         }
 
-        println!("[FLY] App '{app_name}' deleted successfully");
+        print_status("FLY", &format!("App '{app_name}' and associated resources deleted successfully"));
         Ok(())
     }
 }

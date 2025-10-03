@@ -376,13 +376,22 @@ impl<'a> EcrManager<'a> {
 
     /// Delete an ECR repository
     pub async fn delete_repository(&self, instance_name: &str) -> Result<()> {
-        let config = self.load_config(instance_name).await?;
-        let repository_name = &config.repository_name;
-        let region = &config.region;
+        let (repository_name, region) = match self.load_config(instance_name).await {
+            Ok(config) => (config.repository_name.clone(), config.region.clone()),
+            Err(_) => {
+                let repository_name = self.repository_name(instance_name);
+                let region = DEFAULT_ECR_REGION.to_string();
+                print_status(
+                    "ECR",
+                    &format!("Config not found, attempting to delete repository '{repository_name}' in region '{region}'"),
+                );
+                (repository_name, region)
+            }
+        };
 
         print_status(
             "ECR",
-            &format!("Deleting ECR repository '{repository_name}'"),
+            &format!("Deleting ECR repository '{repository_name}' in region '{region}'..."),
         );
 
         let delete_output = self
@@ -390,9 +399,9 @@ impl<'a> EcrManager<'a> {
                 "ecr",
                 "delete-repository",
                 "--repository-name",
-                repository_name,
+                &repository_name,
                 "--region",
-                region,
+                &region,
                 "--force", // Force delete even if repository contains images
             ])
             .await?;
@@ -401,15 +410,24 @@ impl<'a> EcrManager<'a> {
             let stderr = String::from_utf8_lossy(&delete_output.stderr);
             // Check if repository doesn't exist
             if stderr.contains("RepositoryNotFoundException") {
-                println!("[ECR] Repository '{repository_name}' does not exist");
+                print_status("ECR", &format!("Repository '{repository_name}' does not exist (already deleted)"));
                 return Ok(());
+            }
+            // Check for authentication errors
+            if stderr.contains("UnrecognizedClientException") ||
+               stderr.contains("InvalidUserID.NotFound") ||
+               stderr.contains("Token") {
+                return Err(eyre!(
+                    "AWS authentication failed. Please check your AWS credentials and try again.\n\
+                     Run 'aws configure' or set AWS_PROFILE environment variable."
+                ));
             }
             return Err(eyre!(
                 "Failed to delete ECR repository '{repository_name}': {stderr}"
             ));
         }
 
-        println!("[ECR] Repository '{repository_name}' deleted successfully");
+        print_status("ECR", &format!("Repository '{repository_name}' deleted successfully"));
         Ok(())
     }
 

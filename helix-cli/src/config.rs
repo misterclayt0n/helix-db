@@ -371,6 +371,30 @@ impl HelixConfig {
         instances
     }
 
+    /// Removes an instance from the configuration
+    pub fn remove_instance(&mut self, name: &str) -> Result<()> {
+        let total_instances = self.local.len() + self.cloud.len();
+        if total_instances <= 1 {
+            return Err(eyre!(
+                "Cannot delete instance '{}'. At least one instance must remain in the configuration.\n\
+                If you want to remove this project entirely, delete the helix.toml file instead.",
+                name
+            ));
+        }
+
+        // Try to remove from local instances
+        if self.local.remove(name).is_some() {
+            return Ok(());
+        }
+
+        // Try to remove from cloud instances
+        if self.cloud.remove(name).is_some() {
+            return Ok(());
+        }
+
+        Err(eyre!("Instance '{}' not found in configuration", name))
+    }
+
     pub fn default_config(project_name: &str) -> Self {
         let mut local = HashMap::new();
         local.insert(
