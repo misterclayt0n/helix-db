@@ -111,6 +111,7 @@ impl HelixGateway {
         }
 
         axum_app = axum_app.route("/debug/pprof/allocs", axum::routing::get(handle_get_heap));
+        
         let axum_app = axum_app.with_state(Arc::new(AppState {
             worker_pool,
             schema_json: self.opts.and_then(|o| o.config.schema),
