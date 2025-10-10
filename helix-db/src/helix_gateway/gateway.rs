@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use core_affinity::CoreId;
 use helix_metrics::events::{EventType, QueryErrorEvent, QuerySuccessEvent};
+use reqwest::StatusCode;
 use sonic_rs::json;
 use tracing::{info, trace, warn};
 
@@ -109,11 +110,15 @@ impl HelixGateway {
                 .route("/node-details", get(node_details_handler));
         }
 
+        axum_app = axum_app.route("/debug/pprof/allocs", axum::routing::get(handle_get_heap));
         let axum_app = axum_app.with_state(Arc::new(AppState {
             worker_pool,
             schema_json: self.opts.and_then(|o| o.config.schema),
             cluster_id: self.cluster_id,
         }));
+
+
+
 
         rt.block_on(async move {
             let listener = tokio::net::TcpListener::bind(self.address)
@@ -239,5 +244,24 @@ impl CoreSetter {
                 "CoreSetter::set_current called more times than cores.len() * threads_per_core. Core affinity not set"
             ),
         };
+    }
+}
+
+
+pub async fn handle_get_heap() -> Result<impl IntoResponse, (StatusCode, String)> {
+    let mut prof_ctl = jemalloc_pprof::PROF_CTL.as_ref().unwrap().lock().await;
+    require_profiling_activated(&prof_ctl)?;
+    let pprof = prof_ctl
+        .dump_pprof()
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(pprof)
+}
+
+/// Checks whether jemalloc profiling is activated an returns an error response if not.
+fn require_profiling_activated(prof_ctl: &jemalloc_pprof::JemallocProfCtl) -> Result<(), (StatusCode, String)> {
+    if prof_ctl.activated() {
+        Ok(())
+    } else {
+        Err((axum::http::StatusCode::FORBIDDEN, "heap profiling not activated".into()))
     }
 }

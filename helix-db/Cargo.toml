@@ -30,6 +30,10 @@ paste = "1.0.15"
 rayon = "1.11.0"
 mimalloc = "0.1.48"
 
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6.0", features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
+jemalloc_pprof = "0.8.1"
+
 # compiler dependencies
 pest = { version = "2.7", optional = true }
 pest_derive = { version = "2.7", optional = true }
